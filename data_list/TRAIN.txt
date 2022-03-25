@@ -1,0 +1,4 @@
+###Please enter your training data list, for example###
+data_02_01.mat
+data_02_02.mat
+...
