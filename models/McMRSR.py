@@ -5,7 +5,7 @@ import torch.utils.data
 from tqdm import tqdm
 from skimage.measure import compare_ssim as ssim
 
-from networks import get_swin
+from networks import get_network
 from networks.pro_D import gaussian_weights_init
 from models.utils import AverageMeter, get_scheduler, psnr, DataConsistencyInKspace_I, DataConsistencyInKspace_K, fft2_net, complex_abs_eval
 
@@ -30,7 +30,7 @@ class RecurrentModel(nn.Module):
 
         self.is_train = True if hasattr(opts, 'lr') else False
 
-        self.net_G_I = get_swin(opts)
+        self.net_G_I = get_network(opts)
         self.networks.append(self.net_G_I)
 
         if self.is_train:
@@ -87,7 +87,7 @@ class RecurrentModel(nn.Module):
         self.curr_epoch = epoch
 
     def forward(self):
-        I = self.tag_image_sub #128
+        I = self.tag_image_sub
         I.requires_grad_(True)
         I_T1 = self.ref_image_sub
         I_T1.requires_grad_(True)
@@ -97,11 +97,11 @@ class RecurrentModel(nn.Module):
 
         net = {}
         for i in range(1, self.n_recurrent + 1):
-            x_I = I #[b,2,w,h]
-            x_I_T1_sub = I_T1
-            x_T1 = T1
+            tarlr = I
+            reflr = I_T1
+            ref = T1
 
-            net['r%d_img_pred' % i] = self.net_G_I(x_I,x_I_T1_sub,x_T1)  # output recon image [b,c,w,h]
+            net['r%d_img_pred' % i] = self.net_G_I(tarlr, reflr, ref)  # output recon image [b,c,w,h]
             I, net['r%d_kspc_img_dc' % i] = self.dcs_I[i - 1](net['r%d_img_pred' % i], self.tag_kspace_full, self.tag_kspace_mask2d)
  
 
