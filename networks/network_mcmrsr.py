@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -432,13 +431,12 @@ class RSTB(nn.Module):
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
         img_size: Input image size.
         patch_size: Patch size.
-        resi_connection: The convolutional block before residual connection.
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
-                 img_size=224, patch_size=4, resi_connection='1conv'):
+                 img_size=224, patch_size=4):
         super(RSTB, self).__init__()
 
         self.dim = dim
@@ -457,14 +455,7 @@ class RSTB(nn.Module):
                                          downsample=downsample,
                                          use_checkpoint=use_checkpoint)
 
-        if resi_connection == '1conv':
-            self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
-        elif resi_connection == '3conv':
-            # to save parameters and memory
-            self.conv = nn.Sequential(nn.Conv2d(dim, dim // 4, 3, 1, 1), nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                                      nn.Conv2d(dim // 4, dim // 4, 1, 1, 0),
-                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                                      nn.Conv2d(dim // 4, dim, 3, 1, 1))
+        self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
 
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=0, embed_dim=dim,
@@ -565,76 +556,6 @@ class PatchUnEmbed(nn.Module):
         return flops
 
 
-class Upsample(nn.Sequential):
-    """Upsample module.
-
-    Args:
-        scale (int): Scale factor. Supported scales: 2^n and 3.
-        num_feat (int): Channel number of intermediate features.
-    """
-
-    def __init__(self, scale, num_feat):
-        m = []
-        if (scale & (scale - 1)) == 0:  # scale = 2^n
-            for _ in range(int(math.log(scale, 2))):
-                m.append(nn.Conv2d(num_feat, 4 * num_feat, 3, 1, 1))
-                m.append(nn.PixelShuffle(2))
-        elif scale == 3:
-            m.append(nn.Conv2d(num_feat, 9 * num_feat, 3, 1, 1))
-            m.append(nn.PixelShuffle(3))
-        else:
-            raise ValueError(f'scale {scale} is not supported. ' 'Supported scales: 2^n and 3.')
-        super(Upsample, self).__init__(*m)
-
-
-class UpsampleOneStep(nn.Sequential):
-    """UpsampleOneStep module (the difference with Upsample is that it always only has 1conv + 1pixelshuffle)
-       Used in lightweight SR to save parameters.
-
-    Args:
-        scale (int): Scale factor. Supported scales: 2^n and 3.
-        num_feat (int): Channel number of intermediate features.
-
-    """
-
-    def __init__(self, scale, num_feat, num_out_ch, input_resolution=None):
-        self.num_feat = num_feat
-        self.input_resolution = input_resolution
-        m = []
-        m.append(nn.Conv2d(num_feat, (scale ** 2) * num_out_ch, 3, 1, 1))
-        m.append(nn.PixelShuffle(scale))
-        super(UpsampleOneStep, self).__init__(*m)
-
-    def flops(self):
-        H, W = self.input_resolution
-        flops = H * W * self.num_feat * 3 * 9
-        return flops
-
-class MixedFusion_Block(nn.Module):
-
-    def __init__(self, in_dim=32, act_fn=nn.LeakyReLU(0.2, inplace=True)):
-        super(MixedFusion_Block, self).__init__()
-
-        self.layer1 = nn.Sequential(nn.Conv2d(in_dim * 3, in_dim, kernel_size=3, stride=1, padding=1),
-                                    nn.BatchNorm2d(in_dim), act_fn, )
-
-        # revised in 09/09/2019.
-        # self.layer1 = nn.Sequential(nn.Conv2d(in_dim*3, in_dim,  kernel_size=1),nn.BatchNorm2d(in_dim),act_fn,)
-
-    def forward(self, x1, x2):
-        # multi-style fusion
-        fusion_sum = torch.add(x1, x2)  # sum
-        fusion_mul = torch.mul(x1, x2)
-
-        modal_in1 = torch.reshape(x1, [x1.shape[0], 1, x1.shape[1], x1.shape[2]])#, x1.shape[3]])
-        modal_in2 = torch.reshape(x2, [x2.shape[0], 1, x2.shape[1], x2.shape[2]])#, x2.shape[3]])
-        modal_cat = torch.cat((modal_in1, modal_in2), dim=1)
-        fusion_max = modal_cat.max(dim=1)[0]
-
-        out_fusion = torch.add(torch.add(fusion_sum,fusion_mul),fusion_max)
-        out_fusion = out_fusion // 3
-        return out_fusion
-
 def make_layer(block, n_layers):
     layers = []
     for _ in range(n_layers):
@@ -658,9 +579,9 @@ class ResidualBlock(nn.Module):
 
         return out + x
 
-class SAM(nn.Module):
+class SAB(nn.Module):
     def __init__(self, nf, use_residual=True, learnable=True):
-        super(SAM, self).__init__()
+        super(SAB, self).__init__()
 
         self.learnable = learnable
         self.norm_layer = nn.InstanceNorm2d(nf, affine=False)
@@ -705,9 +626,9 @@ class SAM(nn.Module):
 
         return out
 
-class DRAM(nn.Module):
+class JRFAB(nn.Module):
     def __init__(self, nf):
-        super(DRAM, self).__init__()
+        super(JRFAB, self).__init__()
         self.conv_down_a = nn.Conv2d(nf, nf, 3, 2, 1, bias=True)
         self.conv_up_a = nn.ConvTranspose2d(nf, nf, 3, 2, 1, 1, bias=True)
         self.conv_down_b = nn.Conv2d(nf, nf, 3, 2, 1, bias=True)
@@ -725,20 +646,14 @@ class DRAM(nn.Module):
         out = self.act(self.conv_cat(torch.cat([out_a, out_b], dim=1)))
 
         return out
-class Encoder(nn.Module):
+
+class Conv2D(nn.Module):
     def __init__(self, in_chl, nf, n_blks=[1, 1, 1], act='relu'):
-        super(Encoder, self).__init__()
+        super(Conv2D, self).__init__()
 
         block = functools.partial(ResidualBlock, nf=nf)
-
-        self.conv_L1 = nn.Conv2d(in_chl, nf, 3, 1, 1, bias=True)#
+        self.conv_L1 = nn.Conv2d(in_chl, nf, 3, 1, 1, bias=True)
         self.blk_L1 = make_layer(block, n_layers=n_blks[0])
-
-        self.conv_L2 = nn.Conv2d(nf, nf, 3, 2, 1, bias=True)
-        self.blk_L2 = make_layer(block, n_layers=n_blks[1])
-
-        self.conv_L3 = nn.Conv2d(nf, nf, 3, 2, 1, bias=True)
-        self.blk_L3 = make_layer(block, n_layers=n_blks[2])
 
         if act == 'relu':
             self.act = nn.ReLU(inplace=True)
@@ -746,96 +661,74 @@ class Encoder(nn.Module):
             self.act = nn.LeakyReLU(0.1, inplace=True)
 
     def forward(self, x):
-        fea_L1 = self.blk_L1(self.act(self.conv_L1(x)))#64 256
-        fea_L2 = self.blk_L2(self.act(self.conv_L2(fea_L1)))#32 128
-        fea_L3 = self.blk_L3(self.act(self.conv_L3(fea_L2)))#16 64
+        fea_L1 = self.blk_L1(self.act(self.conv_L1(x)))
 
-        return [fea_L1, fea_L2, fea_L3]
+        return fea_L1
 
-class Decoder(nn.Module):
-    def __init__(self, nf, out_chl, n_blks=[1, 1, 1, 1, 1, 1],upscale=4):
-        super(Decoder, self).__init__()
-
+class MAB(nn.Module):
+    def __init__(self, nf, out_chl, n_blks, upscale=4):
+        super(MAB, self).__init__()
         block = functools.partial(ResidualBlock, nf=nf)
 
-        self.conv_L3 = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
-        self.blk_L3 = make_layer(block, n_layers=n_blks[0])
+        ### spatial adaptation block ##
+        self.SAB = SAB(nf, use_residual=True, learnable=True)
+        ### joint residual feature aggregation block ##
+        self.JRFAB = JRFAB(nf)
 
-        self.conv_L2 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
-        self.blk_L2 = make_layer(block, n_layers=n_blks[1])
-
-        self.conv_L1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
-        self.blk_L1 = make_layer(block, n_layers=n_blks[2])
-
-        self.merge_warp_x1 = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
         self.blk_x1 = make_layer(block, n_blks[3])
-
-        self.dram_x2 = DRAM(nf)
         self.blk_x2 = make_layer(block, n_blks[4])
-
-        self.dram_x4 = DRAM(nf)
         self.blk_x4 = make_layer(functools.partial(ResidualBlock, nf=nf), n_blks[5])
+        self.merge = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
 
         self.conv_out = nn.Conv2d(nf, out_chl, 3, 1, 1, bias=True)
-
         self.act = nn.ReLU(inplace=True)
 
-        self.pAda = SAM(nf, use_residual=True, learnable=True)
-
-    def forward(self, lr_l, warp_ref_l,upscale):
-        fea_L3 = self.act(self.conv_L3(lr_l[2]))
-        fea_L3 = self.blk_L3(fea_L3)
-        fea_L3_up = F.interpolate(fea_L3, scale_factor=2, mode='bilinear', align_corners=False)
-
-        fea_L2 = self.act(self.conv_L2(torch.cat([fea_L3_up, lr_l[1]], dim=1)))
-        fea_L2 = self.blk_L2(fea_L2)
-        fea_L2_up = F.interpolate(fea_L2, scale_factor=2, mode='bilinear', align_corners=False)
-
-        fea_L1 = self.act(self.conv_L1(torch.cat([fea_L2_up, lr_l[0]], dim=1)))
-        fea_L1 = self.blk_L1(fea_L1)
+    def forward(self, tar_lr, F_M, upscale):
 
         if upscale == 2:
-            warp_ref_x1 = self.pAda(fea_L1, warp_ref_l[1])
-            fea_x1 = self.act(self.merge_warp_x1(torch.cat([warp_ref_x1, fea_L1], dim=1)))
+            warp_ref_x1 = self.SAB(tar_lr, F_M[1])
+            fea_x1 = self.act(self.merge(torch.cat([warp_ref_x1, tar_lr], dim=1)))
             fea_x1 = self.blk_x1(fea_x1)
             fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
-            warp_ref_x2 = self.pAda(fea_x1_up, warp_ref_l[0])
-            fea_x2 = self.dram_x2(fea_x1, warp_ref_x2)
+            warp_ref_x2 = self.SAB(fea_x1_up, F_M[0])
+            fea_x2 = self.JRFAB(fea_x1, warp_ref_x2)
             fea_x2 = self.blk_x2(fea_x2)
+
             out = self.conv_out(fea_x2)
+
         elif upscale == 4:
-            warp_ref_x1 = self.pAda(fea_L1, warp_ref_l[2])
-            fea_x1 = self.act(self.merge_warp_x1(torch.cat([warp_ref_x1, fea_L1], dim=1)))
+            warp_ref_x1 = self.SAB(tar_lr, F_M[2])
+            fea_x1 = self.act(self.merge(torch.cat([warp_ref_x1, tar_lr], dim=1)))
             fea_x1 = self.blk_x1(fea_x1)
             fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
-            warp_ref_x2 = self.pAda(fea_x1_up, warp_ref_l[1])
-            fea_x2 = self.dram_x2(fea_x1, warp_ref_x2)
+            warp_ref_x2 = self.SAB(fea_x1_up, F_M[1])
+            fea_x2 = self.JRFAB(fea_x1, warp_ref_x2)
             fea_x2 = self.blk_x2(fea_x2)
             fea_x2_up = F.interpolate(fea_x2, scale_factor=2, mode='bilinear', align_corners=False)
-            # print(fea_x2_up.shape, warp_ref_l[0].shape, fea_x2.shape)
-            warp_ref_x4 = self.pAda(fea_x2_up, warp_ref_l[0])
-            # print(warp_ref_l[0].shape,fea_x2.shape,warp_ref_x4.shape)
-            fea_x4 = self.dram_x4(fea_x2, warp_ref_x4)
+
+            warp_ref_x4 = self.SAB(fea_x2_up, F_M[0])
+            fea_x4 = self.JRFAB(fea_x2, warp_ref_x4)
             fea_x4 = self.blk_x4(fea_x4)
+
             out = self.conv_out(fea_x4)
 
         return out
-#==========================================
-#===========================================
-class SwinIR(nn.Module):
-    r""" SwinIR
-        A PyTorch impl of : `SwinIR: Image Restoration Using Swin Transformer`, based on Swin Transformer.
+
+
+class McMRSR(nn.Module):
+    r""" McMRSR
+        A PyTorch impl of : `Transformer-empowered Multi-scale Contextual Matching and Aggregation for Multi-contrast MRI Super-resolution`, based on SwinIR.
 
     Args:
         img_size (int | tuple(int)): Input image size. Default 64
         patch_size (int | tuple(int)): Patch size. Default: 1
-        in_chans (int): Number of input image channels. Default: 3
-        embed_dim (int): Patch embedding dimension. Default: 96
+        in_chans (int): Number of input image channels. Default: 2
+        embed_dim (int): Patch embedding dimension. Default: 60
         depths (tuple(int)): Depth of each Swin Transformer layer.
         num_heads (tuple(int)): Number of attention heads in different layers.
-        window_size (int): Window size. Default: 7
+        window_size (int): Window size. Default: 8
         mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
         qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
         qk_scale (float): Override default qk scale of head_dim ** -0.5 if set. Default: None
@@ -846,23 +739,20 @@ class SwinIR(nn.Module):
         ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
         patch_norm (bool): If True, add normalization after patch embedding. Default: True
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
-        upscale: Upscale factor. 2/3/4/8 for image SR, 1 for denoising and compress artifact reduction
+        upscale: Upscale factor. 2/4 for image SR, 1 for denoising and compress artifact reduction
         img_range: Image range. 1. or 255.
-        upsampler: The reconstruction reconstruction module. 'pixelshuffle'/'pixelshuffledirect'/'nearest+conv'/None
-        resi_connection: The convolutional block before residual connection. '1conv'/'3conv'
     """
 
     def __init__(self, img_size=64, patch_size=1, in_chans=2,
-                 embed_dim=96, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
-                 window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 embed_dim=60, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
+                 window_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-                 use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv',
+                 use_checkpoint=False, upscale=2, img_range=1.,
                  **kwargs):
-        super(SwinIR, self).__init__()
+        super(McMRSR, self).__init__()
         num_in_ch = in_chans
-        num_out_ch = in_chans
-        num_feat = 64
+
         self.img_range = img_range
         if in_chans == 3:
             rgb_mean = (0.4488, 0.4371, 0.4040)
@@ -870,30 +760,29 @@ class SwinIR(nn.Module):
         else:
             self.mean = torch.zeros(1, 1, 1, 1)
         self.upscale = upscale
-        self.upsampler = upsampler
         self.window_size = window_size
-        #---------------------------
-        n_blks = [2, 2, 2]#[4, 4, 4]
+        n_blks = [2, 2, 2]
         n_blks_dec = [2, 2, 2, 12, 8, 4]
-        # n_blks = [1, 1, 1]
-        # n_blks_dec = [1, 1, 1, 1, 1, 1]
-        self.decoder = Decoder(embed_dim, num_in_ch, n_blks=n_blks_dec,upscale=self.upscale)
-        self.enc = Encoder(in_chl=num_in_ch, nf=embed_dim, n_blks=n_blks)
         self.lr_block_size = 8
         self.ref_down_block_size = 1.5
         self.dilations = [1, 2, 3]
         self.num_nbr = 1
         self.psize = 3
 
+        self.MAB = MAB(embed_dim, num_in_ch, n_blks=n_blks_dec, upscale=self.upscale)
+
         #####################################################################################################
-        ################################### 1, shallow feature extraction ###################################
+        ################################### 1, Tar/Ref LR feature extraction ###################################
+        self.conv2d = Conv2D(in_chl=num_in_ch, nf=embed_dim, n_blks=n_blks)
+
+        #####################################################################################################
+        ################################### 2, Reference feature extraction ###################################
         self.conv_first = nn.Conv2d(num_in_ch, embed_dim, 3, 1, 1)
         self.conv_second = nn.Conv2d(embed_dim, embed_dim, 3, 2, 1)
         self.conv_third = nn.Conv2d(embed_dim, embed_dim, 3, 2, 1)
-        # self.MFB = MixedFusion_Block(in_dim=60, act_fn=nn.LeakyReLU(0.2, inplace=True))
 
         #####################################################################################################
-        ################################### 2, deep feature extraction ######################################
+        ################################### 3, deep feature extraction (STG) ######################################
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
@@ -942,48 +831,12 @@ class SwinIR(nn.Module):
                          use_checkpoint=use_checkpoint,
                          img_size=img_size,
                          patch_size=patch_size,
-                         resi_connection=resi_connection
-
                          )
             self.layers.append(layer)
         self.norm = norm_layer(self.num_features)
 
-        # build the last conv layer in deep feature extraction
-        if resi_connection == '1conv':
-            self.conv_after_body = nn.Conv2d(embed_dim, embed_dim, 3, 1, 1)
-        elif resi_connection == '3conv':
-            # to save parameters and memory
-            self.conv_after_body = nn.Sequential(nn.Conv2d(embed_dim, embed_dim // 4, 3, 1, 1),
-                                                 nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                                                 nn.Conv2d(embed_dim // 4, embed_dim // 4, 1, 1, 0),
-                                                 nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                                                 nn.Conv2d(embed_dim // 4, embed_dim, 3, 1, 1))
-
-        #####################################################################################################
-        ################################ 3, high quality image reconstruction ################################
-        if self.upsampler == 'pixelshuffle':
-            # for classical SR
-            self.conv_before_upsample = nn.Sequential(nn.Conv2d(embed_dim, num_feat, 3, 1, 1),
-                                                      nn.LeakyReLU(inplace=True))
-            self.upsample = Upsample(upscale, num_feat)
-            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
-        elif self.upsampler == 'pixelshuffledirect':
-            # for lightweight SR (to save parameters)
-            self.upsample = UpsampleOneStep(1, embed_dim, num_out_ch,
-                                            (patches_resolution[0], patches_resolution[1]))
-        elif self.upsampler == 'nearest+conv':
-            # for real-world SR (less artifacts)
-            assert self.upscale == 4, 'only support x4 now.'
-            self.conv_before_upsample = nn.Sequential(nn.Conv2d(embed_dim, num_feat, 3, 1, 1),
-                                                      nn.LeakyReLU(inplace=True))
-            self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-            self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-            self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
-            self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-        else:
-            # for image denoising and JPEG compression artifact reduction
-            self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
+        # build the last conv layer in deep feature extraction (Conv2d)
+        self.conv_after_RSTB = nn.Conv2d(embed_dim, embed_dim, 3, 1, 1)
 
         self.apply(self._init_weights)
 
@@ -1010,7 +863,7 @@ class SwinIR(nn.Module):
         mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
-    #=========================
+
     def bis(self, input, dim, index):
         # batch index select
         # input: [N, C*k*k, H*W]
@@ -1102,8 +955,8 @@ class SwinIR(nn.Module):
         out_fold = out_fold / divisor * soft_att_resize
         # out_fold = out_fold / (ks*ks) * soft_att_resize
         return out_fold
-    #==============guide
-    def forward_features(self,x):
+
+    def forward_features_RSTB(self,x):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
@@ -1112,182 +965,153 @@ class SwinIR(nn.Module):
         for layer in self.layers:
             x = layer(x, x_size)
 
-        x = self.norm(x)  # B L C
+        x = self.norm(x)
         x = self.patch_unembed(x, x_size)
 
         return x
 
-    def forward(self, x,x_T1_lr,x_T1):
-        bs, _, h, w = x.size()
+    ## Multi-scale Contextual Matching based on MASA-SR##
+    ## https://github.com/dvlab-research/MASA-SRhttps://github.com/dvlab-research/MASA-SR ##
+    def contextual_matching(self, tar_lr, ref_lr, ref_feature, upscale):
+
+        bs, _, h, w = tar_lr.size()
         px = w // self.lr_block_size
         py = h // self.lr_block_size
         k_x = w // px
         k_y = h // py
-        _, _, h, w = x_T1_lr.size()
+        _, _, h, w = ref_lr.size()
         diameter_x = 2 * int(w // (2 * px) * self.ref_down_block_size) + 1
-        # print(diameter_x)
         diameter_y = 2 * int(h // (2 * py) * self.ref_down_block_size) + 1
-        # print(diameter_y)
-        #---------------
-        H, W = x.shape[2:]
 
+        ### begin ####
+        N, C, H, W = tar_lr.size()
+        _, _, Hr, Wr = ref_lr.size()
 
-        if self.upsampler == 'pixelshuffle':
-            # for classical SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.conv_before_upsample(x)
-            x = self.conv_last(self.upsample(x))
-        elif self.upsampler == 'pixelshuffledirect':
-            lrsr = F.interpolate(x, scale_factor=self.upscale, mode='bicubic', align_corners=True)
-            # for lightweight SR
-            # =======first
-            fea_lr_l = self.enc(x)
-            fea_lr_l_swin = self.conv_after_body(self.forward_features(fea_lr_l[0])) + fea_lr_l[0]
-            fea_lr_l = [fea_lr_l_swin, fea_lr_l[1],fea_lr_l[2]]
-            # print(fea_lr_l[0].shape, fea_lr_l[1].shape, fea_lr_l[2].shape)
+        lr_patches = F.pad(tar_lr, pad=(1, 1, 1, 1), mode='replicate')
+        lr_patches = F.unfold(lr_patches, kernel_size=(k_y + 2, k_x + 2), padding=(0, 0), stride=(k_y, k_x))  # [N, C*(k_y+2)*(k_x+2), py*px]
+        lr_patches = lr_patches.view(N, C, k_y + 2, k_x + 2, py * px).permute(0, 4, 1, 2, 3)  # [N, py*px, C, k_y+2, k_x+2]
 
-            fea_reflr_l = self.enc(x_T1_lr)
-            fea_reflr_l_swin = self.conv_after_body(self.forward_features(fea_reflr_l[0])) + fea_reflr_l[0]
-            fea_reflr_l = [fea_reflr_l_swin, fea_reflr_l[1], fea_reflr_l[2]]
-            # print(fea_reflr_l[0].shape, fea_reflr_l[1].shape, fea_reflr_l[2].shape)
+        ## find the corresponding ref patch for each lr patch
+        sorted_corr, ind_l = self.search(lr_patches, ref_lr, ks=3, pd=1, stride=1, dilations=self.dilations)
 
-            fea_ref_l_0 = self.conv_first(x_T1)
-            fea_ref_l_0 = self.conv_after_body(self.forward_features(fea_ref_l_0)) + fea_ref_l_0
-            fea_ref_l_1 = self.conv_second(fea_ref_l_0)
-            fea_ref_l_1 = self.conv_after_body(self.forward_features(fea_ref_l_1)) + fea_ref_l_1
-            fea_ref_l_2 = self.conv_third(fea_ref_l_1)
-            fea_ref_l_2 = self.conv_after_body(self.forward_features(fea_ref_l_2)) + fea_ref_l_2
-            fea_ref_l = [fea_ref_l_0, fea_ref_l_1, fea_ref_l_2]
+        ## crop corresponding ref patches
+        index = ind_l[:, :, 0]  # [N, py*px]
+        idx_x = index % Wr
+        idx_y = index // Wr
+        idx_x1 = idx_x - diameter_x // 2 - 1
+        idx_x2 = idx_x + diameter_x // 2 + 1
+        idx_y1 = idx_y - diameter_y // 2 - 1
+        idx_y2 = idx_y + diameter_y // 2 + 1
 
-            N, C, H, W = fea_lr_l[0].size()
-            # print(fea_lr_l[0].size())
-            _, _, Hr, Wr = fea_reflr_l[0].size()
-            # print(fea_reflr_l[0].size())
+        mask = (idx_x1 < 0).long()
+        idx_x1 = idx_x1 * (1 - mask)
+        idx_x2 = idx_x2 * (1 - mask) + (diameter_x + 1) * mask
 
-            lr_patches = F.pad(fea_lr_l[0], pad=(1, 1, 1, 1), mode='replicate')
-            lr_patches = F.unfold(lr_patches, kernel_size=(k_y + 2, k_x + 2), padding=(0, 0),
-                                  stride=(k_y, k_x))  # [N, C*(k_y+2)*(k_x+2), py*px]
-            lr_patches = lr_patches.view(N, C, k_y + 2, k_x + 2, py * px).permute(0, 4, 1, 2,
-                                                                                  3)  # [N, py*px, C, k_y+2, k_x+2]
+        mask = (idx_x2 > Wr - 1).long()
+        idx_x2 = idx_x2 * (1 - mask) + (Wr - 1) * mask
+        idx_x1 = idx_x1 * (1 - mask) + (idx_x2 - (diameter_x + 1)) * mask
 
-            ## find the corresponding ref patch for each lr patch
-            sorted_corr, ind_l = self.search(lr_patches, fea_reflr_l[0],
-                                             ks=3, pd=1, stride=1, dilations=self.dilations)
+        mask = (idx_y1 < 0).long()
+        idx_y1 = idx_y1 * (1 - mask)
+        idx_y2 = idx_y2 * (1 - mask) + (diameter_y + 1) * mask
 
-            ## crop corresponding ref patches
-            index = ind_l[:, :, 0]  # [N, py*px]
-            idx_x = index % Wr
-            idx_y = index // Wr
-            idx_x1 = idx_x - diameter_x // 2 - 1
-            idx_x2 = idx_x + diameter_x // 2 + 1
-            idx_y1 = idx_y - diameter_y // 2 - 1
-            idx_y2 = idx_y + diameter_y // 2 + 1
+        mask = (idx_y2 > Hr - 1).long()
+        idx_y2 = idx_y2 * (1 - mask) + (Hr - 1) * mask
+        idx_y1 = idx_y1 * (1 - mask) + (idx_y2 - (diameter_y + 1)) * mask
 
-            mask = (idx_x1 < 0).long()
-            idx_x1 = idx_x1 * (1 - mask)
-            idx_x2 = idx_x2 * (1 - mask) + (diameter_x + 1) * mask
+        ind_y_x1, ind_x_x1 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 1)
+        ind_y_x2, ind_x_x2 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 2)
+        ind_y_x4, ind_x_x4 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 4)
 
-            mask = (idx_x2 > Wr - 1).long()
-            idx_x2 = idx_x2 * (1 - mask) + (Wr - 1) * mask
-            idx_x1 = idx_x1 * (1 - mask) + (idx_x2 - (diameter_x + 1)) * mask
+        ind_b = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * (diameter_y + 2) * (diameter_x + 2))
+        ind_b_x2 = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * ((diameter_y + 2) * 2) * ((diameter_x + 2) * 2))
+        ind_b_x4 = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * ((diameter_y + 2) * 4) * ((diameter_x + 2) * 4))
 
-            mask = (idx_y1 < 0).long()
-            idx_y1 = idx_y1 * (1 - mask)
-            idx_y2 = idx_y2 * (1 - mask) + (diameter_y + 1) * mask
+        if upscale == 2:
+            reflr_patches = ref_lr[ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()  # [N*py*px, C, (radius_y+1)*2, (radius_x+1)*2]
+            ref_patches_x1 = ref_feature[1][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()
+            ref_patches_x2 = ref_feature[0][ind_b_x2, :, ind_y_x2, ind_x_x2].view(N * py * px, (diameter_y + 2) * 2, (diameter_x + 2) * 2, C).permute(0, 3, 1, 2).contiguous()
 
-            mask = (idx_y2 > Hr - 1).long()
-            idx_y2 = idx_y2 * (1 - mask) + (Hr - 1) * mask
-            idx_y1 = idx_y1 * (1 - mask) + (idx_y2 - (diameter_y + 1)) * mask
+            ## calculate correlation between lr patches and their corresponding ref patches
+            lr_patches = lr_patches.contiguous().view(N * py * px, C, k_y + 2, k_x + 2)
+            corr_all_l, index_all_l = self.search_org(lr_patches, reflr_patches, ks=self.psize, pd=self.psize // 2, stride=1)
 
-            ind_y_x1, ind_x_x1 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 1)
-            ind_y_x2, ind_x_x2 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 2)
-            ind_y_x4, ind_x_x4 = self.make_grid(idx_x1, idx_y1, diameter_x + 2, diameter_y + 2, 4)
+            index_all = index_all_l[:, :, :, 0]  # [N*p*p, k_y, k_x]
+            soft_att_all = corr_all_l[:, :, :, 0:1].permute(0, 3, 1, 2)  # [N*p*p, 1, k_y, k_x]
 
-            ind_b = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * (diameter_y + 2) * (diameter_x + 2))
-            ind_b_x2 = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * ((diameter_y + 2) * 2) * ((diameter_x + 2) * 2))
-            ind_b_x4 = torch.repeat_interleave(torch.arange(0, N, dtype=torch.long, device=idx_x1.device), py * px * ((diameter_y + 2) * 4) * ((diameter_x + 2) * 4))
+            warp_ref_patches_x1 = self.transfer(ref_patches_x1, index_all, soft_att_all, ks=self.psize, pd=self.psize // 2, stride=1)  # [N*py*px, C, k_y, k_x]
+            warp_ref_patches_x2 = self.transfer(ref_patches_x2, index_all, soft_att_all, ks=self.psize * 2, pd=self.psize // 2 * 2, stride=2)  # [N*py*px, C, k_y*2, k_x*2]
 
-            if self.upscale == 2:
-                reflr_patches = fea_reflr_l[0][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()  # [N*py*px, C, (radius_y+1)*2, (radius_x+1)*2]
-                ref_patches_x1 = fea_ref_l[1][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()
-                ref_patches_x2 = fea_ref_l[0][ind_b_x2, :, ind_y_x2, ind_x_x2].view(N * py * px, (diameter_y + 2) * 2, (diameter_x + 2) * 2, C).permute(0, 3, 1, 2).contiguous()
-                ## calculate correlation between lr patches and their corresponding ref patches
-                lr_patches = lr_patches.contiguous().view(N * py * px, C, k_y + 2, k_x + 2)
-                corr_all_l, index_all_l = self.search_org(lr_patches, reflr_patches, ks=self.psize, pd=self.psize // 2, stride=1)
-                index_all = index_all_l[:, :, :, 0]  # [N*p*p, k_y, k_x]
-                soft_att_all = corr_all_l[:, :, :, 0:1].permute(0, 3, 1, 2)  # [N*p*p, 1, k_y, k_x]
+            warp_ref_patches_x1 = warp_ref_patches_x1.view(N, py, px, C, H // py, W // px).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py, px, W//px]
+            warp_ref_patches_x1 = warp_ref_patches_x1.view(N, C, H, W)
 
-                warp_ref_patches_x1 = self.transfer(ref_patches_x1, index_all, soft_att_all, ks=self.psize, pd=self.psize // 2, stride=1)  # [N*py*px, C, k_y, k_x]
-                warp_ref_patches_x2 = self.transfer(ref_patches_x2, index_all, soft_att_all, ks=self.psize * 2, pd=self.psize // 2 * 2, stride=2)  # [N*py*px, C, k_y*2, k_x*2]
+            warp_ref_patches_x2 = warp_ref_patches_x2.view(N, py, px, C, H // py * 2, W // px * 2).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*2, px, W//px*2]
+            warp_ref_patches_x2 = warp_ref_patches_x2.view(N, C, H * 2, W * 2)
 
-                warp_ref_patches_x1 = warp_ref_patches_x1.view(N, py, px, C, H // py, W // px).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py, px, W//px]
-                warp_ref_patches_x1 = warp_ref_patches_x1.view(N, C, H, W)
-                warp_ref_patches_x2 = warp_ref_patches_x2.view(N, py, px, C, H // py * 2, W // px * 2).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*2, px, W//px*2]
-                warp_ref_patches_x2 = warp_ref_patches_x2.view(N, C, H * 2, W * 2)
-                # print(warp_ref_patches_x2.shape,warp_ref_patches_x1.shape)
-                warp_ref_l = [warp_ref_patches_x2, warp_ref_patches_x1]
+            F_M = [warp_ref_patches_x2, warp_ref_patches_x1]
 
-            elif self.upscale == 4:
-                reflr_patches = fea_reflr_l[0][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()  # [N*py*px, C, (radius_y+1)*2, (radius_x+1)*2]
-                ref_patches_x1 = fea_ref_l[2][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()
-                ref_patches_x2 = fea_ref_l[1][ind_b_x2, :, ind_y_x2, ind_x_x2].view(N * py * px, (diameter_y + 2) * 2, (diameter_x + 2) * 2, C).permute(0, 3, 1, 2).contiguous()
-                ref_patches_x4 = fea_ref_l[0][ind_b_x4, :, ind_y_x4, ind_x_x4].view(N * py * px, (diameter_y + 2) * 4, (diameter_x + 2) * 4, C).permute(0, 3, 1, 2).contiguous()
+        elif upscale == 4:
+            reflr_patches = ref_lr[ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()  # [N*py*px, C, (radius_y+1)*2, (radius_x+1)*2]
+            ref_patches_x1 = ref_feature[2][ind_b, :, ind_y_x1, ind_x_x1].view(N * py * px, diameter_y + 2, diameter_x + 2, C).permute(0, 3, 1, 2).contiguous()
+            ref_patches_x2 = ref_feature[1][ind_b_x2, :, ind_y_x2, ind_x_x2].view(N * py * px, (diameter_y + 2) * 2, (diameter_x + 2) * 2, C).permute(0, 3, 1, 2).contiguous()
+            ref_patches_x4 = ref_feature[0][ind_b_x4, :, ind_y_x4, ind_x_x4].view(N * py * px, (diameter_y + 2) * 4, (diameter_x + 2) * 4, C).permute(0, 3, 1, 2).contiguous()
 
-                ## calculate correlation between lr patches and their corresponding ref patches
-                lr_patches = lr_patches.contiguous().view(N * py * px, C, k_y + 2, k_x + 2)
-                corr_all_l, index_all_l = self.search_org(lr_patches, reflr_patches, ks=self.psize, pd=self.psize // 2, stride=1)
+            ## calculate correlation between lr patches and their corresponding ref patches
+            lr_patches = lr_patches.contiguous().view(N * py * px, C, k_y + 2, k_x + 2)
+            corr_all_l, index_all_l = self.search_org(lr_patches, reflr_patches, ks=self.psize, pd=self.psize // 2, stride=1)
 
-                #===========
-                # print_corr_all_l = corr_all_l.cpu().detach().numpy()
-                # np.save('print_corr_all_l.npy', print_corr_all_l)
+            index_all = index_all_l[:, :, :, 0]  # [N*p*p, k_y, k_x]
+            soft_att_all = corr_all_l[:, :, :, 0:1].permute(0, 3, 1, 2)  # [N*p*p, 1, k_y, k_x]
 
-                # print_index_all_l = index_all_l.cpu().detach().numpy()
-                # np.save('print_index_all_l.npy', print_index_all_l)
+            warp_ref_patches_x1 = self.transfer(ref_patches_x1, index_all, soft_att_all, ks=self.psize, pd=self.psize // 2, stride=1)  # [N*py*px, C, k_y, k_x]
+            warp_ref_patches_x2 = self.transfer(ref_patches_x2, index_all, soft_att_all, ks=self.psize * 2, pd=self.psize // 2 * 2, stride=2)  # [N*py*px, C, k_y*2, k_x*2]
+            warp_ref_patches_x4 = self.transfer(ref_patches_x4, index_all, soft_att_all, ks=self.psize * 4, pd=self.psize // 2 * 4, stride=4)  # [N*py*px, C, k_y*4, k_x*4]
 
-                index_all = index_all_l[:, :, :, 0]  # [N*p*p, k_y, k_x]
-                soft_att_all = corr_all_l[:, :, :, 0:1].permute(0, 3, 1, 2)  # [N*p*p, 1, k_y, k_x]
+            warp_ref_patches_x1 = warp_ref_patches_x1.view(N, py, px, C, H // py, W // px).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py, px, W//px]
+            warp_ref_patches_x1 = warp_ref_patches_x1.view(N, C, H, W)
 
-                warp_ref_patches_x1 = self.transfer(ref_patches_x1, index_all, soft_att_all, ks=self.psize, pd=self.psize // 2, stride=1)  # [N*py*px, C, k_y, k_x]
-                warp_ref_patches_x2 = self.transfer(ref_patches_x2, index_all, soft_att_all, ks=self.psize * 2, pd=self.psize // 2 * 2, stride=2)  # [N*py*px, C, k_y*2, k_x*2]
-                warp_ref_patches_x4 = self.transfer(ref_patches_x4, index_all, soft_att_all, ks=self.psize * 4, pd=self.psize // 2 * 4, stride=4)  # [N*py*px, C, k_y*4, k_x*4]
+            warp_ref_patches_x2 = warp_ref_patches_x2.view(N, py, px, C, H // py * 2, W // px * 2).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*2, px, W//px*2]
+            warp_ref_patches_x2 = warp_ref_patches_x2.view(N, C, H * 2, W * 2)
 
-                warp_ref_patches_x1 = warp_ref_patches_x1.view(N, py, px, C, H // py, W // px).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py, px, W//px]
-                warp_ref_patches_x1 = warp_ref_patches_x1.view(N, C, H, W)
-                warp_ref_patches_x2 = warp_ref_patches_x2.view(N, py, px, C, H // py * 2, W // px * 2).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*2, px, W//px*2]
-                warp_ref_patches_x2 = warp_ref_patches_x2.view(N, C, H * 2, W * 2)
-                warp_ref_patches_x4 = warp_ref_patches_x4.view(N, py, px, C, H // py * 4, W // px * 4).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*4, px, W//px*4]
-                warp_ref_patches_x4 = warp_ref_patches_x4.view(N, C, H * 4, W * 4)
-                warp_ref_l = [warp_ref_patches_x4, warp_ref_patches_x2, warp_ref_patches_x1]
+            warp_ref_patches_x4 = warp_ref_patches_x4.view(N, py, px, C, H // py * 4, W // px * 4).permute(0, 3, 1, 4, 2, 5).contiguous()  # [N, C, py, H//py*4, px, W//px*4]
+            warp_ref_patches_x4 = warp_ref_patches_x4.view(N, C, H * 4, W * 4)
 
-            masa_out = self.decoder(fea_lr_l, warp_ref_l, self.upscale)
-            masa_out = masa_out + lrsr
+            F_M = [warp_ref_patches_x4, warp_ref_patches_x2, warp_ref_patches_x1]
+        ##### end #####
 
-            # masa_out = self.conv_first(masa_out)
-            # masa_out = self.conv_after_body(self.forward_features(masa_out)) + masa_out
-            # masa_out = self.upsample(masa_out)
+        return F_M
 
+    def forward(self, tar, reflr, ref):
+        #### tar_lr #####
+        #### Conv2D #####
+        tar_lr = self.conv2d(tar)
+        ###### STG ######
+        tar_lr = self.conv_after_RSTB(self.forward_features_RSTB(tar_lr)) + tar_lr
 
-            # x = self.upsample(x_lr_2)
-        elif self.upsampler == 'nearest+conv':
-            # for real-world SR
-            x = self.conv_first(x)
-            x = self.conv_after_body(self.forward_features(x)) + x
-            x = self.conv_before_upsample(x)
-            x = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
-            x = self.lrelu(self.conv_up2(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
-            x = self.conv_last(self.lrelu(self.conv_hr(x)))
-        else:
-            # for image denoising and JPEG compression artifact reduction
-            x_first = self.conv_first(x)
-            res = self.conv_after_body(self.forward_features(x_first)) + x_first
-            x = x + self.conv_last(res)
+        #### ref_lr #####
+        #### Conv2D #####
+        ref_lr = self.conv2d(reflr)
+        ###### STG ######
+        ref_lr = self.conv_after_RSTB(self.forward_features_RSTB(ref_lr)) + ref_lr
 
-        x = masa_out #/ self.img_range + self.mean_x
-        # x_T1 = x_T1 / self.img_range + self.mean
-        # print(x.shape)
+        #### Ref Pyramid begin ####
+        #### Conv2D & STG#####
+        ref_0 = self.conv_first(ref)
+        ref_0 = self.conv_after_RSTB(self.forward_features_RSTB(ref_0)) + ref_0
+        ref_1 = self.conv_second(ref_0)
+        ref_1 = self.conv_after_RSTB(self.forward_features_RSTB(ref_1)) + ref_1
+        ref_2 = self.conv_third(ref_1)
+        ref_2 = self.conv_after_RSTB(self.forward_features_RSTB(ref_2)) + ref_2
+        ref_feature = [ref_0, ref_1, ref_2]
+        #### Ref Pyramid end ####
 
-        return x#[:, :, :H*self.upscale, :W*self.upscale]#,x_T1[:, :, :H*self.upscale, :W*self.upscale]
+        ## Multi-scale Contextual Matching ##
+        F_M = self.contextual_matching(tar_lr, ref_lr, ref_feature, self.upscale)
+
+        ## Multi-Scale Aggregation Block (MAB) ##
+        Tar_Rec_SR = self.MAB(tar_lr, F_M, self.upscale)
+
+        return Tar_Rec_SR
 
     def flops(self):
         flops = 0
@@ -1304,19 +1128,18 @@ class SwinIR(nn.Module):
 if __name__ == '__main__':
     upscale = 4
     window_size = 8
-    height = 64#(1024 // upscale // window_size + 1) * window_size
-    width = 64#(720 // upscale // window_size + 1) * window_size
-    model = SwinIR(upscale=upscale, img_size=(height, width),
+    height = 64
+    width = 64
+    model = McMRSR(upscale=upscale, img_size=(height, width),
                    window_size=window_size, img_range=1., depths=[6, 6, 6, 6],
-                   embed_dim=60, num_heads=[6, 6, 6, 6], mlp_ratio=2, upsampler='pixelshuffledirect')
+                   embed_dim=60, num_heads=[6, 6, 6, 6], mlp_ratio=2)
     num_param = sum([p.numel() for p in model.parameters() if p.requires_grad])
 
     print(model)
-    # print(height, width, model.flops() / 1e9)
     print('Number of parameters: {}'.format(num_param))
-    x = torch.randn((3, 2, height, width))
-    x_T1_lr = torch.randn((3, 2, height, width))
-    x_T1 = torch.randn((3, 2, height*upscale, width*upscale))
+    x = torch.randn((1, 2, height, width))
+    x_T1_lr = torch.randn((1, 2, height, width))
+    x_T1 = torch.randn((1, 2, height*upscale, width*upscale))
     x = model(x,x_T1_lr,x_T1)
     print(x.shape)
-    # print(x_T1.shape)
+
