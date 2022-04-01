@@ -710,8 +710,8 @@ class MAB(nn.Module):
             warp_ref_x1 = self.SAB(tar_lr, F_M[1])
             fea_x1 = self.JRFAB_same_scale(tar_lr, warp_ref_x1)
             fea_x1 = self.blk_x1(fea_x1)
-            fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
+            fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
             warp_ref_x2 = self.SAB(fea_x1_up, F_M[0])
             fea_x2 = self.JRFAB(fea_x1, warp_ref_x2)
             fea_x2 = self.blk_x2(fea_x2)
@@ -722,13 +722,13 @@ class MAB(nn.Module):
             warp_ref_x1 = self.SAB(tar_lr, F_M[2])
             fea_x1 = self.JRFAB_same_scale(tar_lr, warp_ref_x1)
             fea_x1 = self.blk_x1(fea_x1)
-            fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
+            fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
             warp_ref_x2 = self.SAB(fea_x1_up, F_M[1])
             fea_x2 = self.JRFAB(fea_x1, warp_ref_x2)
             fea_x2 = self.blk_x2(fea_x2)
-            fea_x2_up = F.interpolate(fea_x2, scale_factor=2, mode='bilinear', align_corners=False)
 
+            fea_x2_up = F.interpolate(fea_x2, scale_factor=2, mode='bilinear', align_corners=False)
             warp_ref_x4 = self.SAB(fea_x2_up, F_M[0])
             fea_x4 = self.JRFAB(fea_x2, warp_ref_x4)
             fea_x4 = self.blk_x4(fea_x4)
