@@ -647,6 +647,27 @@ class JRFAB(nn.Module):
 
         return out
 
+class JRFAB_same_scale(nn.Module):
+    def __init__(self, nf):
+        super(JRFAB_same_scale, self).__init__()
+        self.conv_down_a = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.conv_up_a = nn.Conv2d(nf, nf, 3, 1, 1, 1, bias=True)
+        self.conv_down_b = nn.Conv2d(nf, nf, 3, 1, 1, bias=True)
+        self.conv_up_b = nn.Conv2d(nf, nf, 3, 1, 1, 1, bias=True)
+        self.conv_cat = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, lr, ref):
+        res_a = self.act(self.conv_down_a(ref)) - lr
+        out_a = self.act(self.conv_up_a(res_a)) + ref
+
+        res_b = lr - self.act(self.conv_down_b(ref))
+        out_b = self.act(self.conv_up_b(res_b + lr))
+
+        out = self.act(self.conv_cat(torch.cat([out_a, out_b], dim=1)))
+
+        return out
+
 class Conv2D(nn.Module):
     def __init__(self, in_chl, nf, n_blks=[1, 1, 1], act='relu'):
         super(Conv2D, self).__init__()
@@ -674,11 +695,11 @@ class MAB(nn.Module):
         self.SAB = SAB(nf, use_residual=True, learnable=True)
         ### joint residual feature aggregation block ##
         self.JRFAB = JRFAB(nf)
+        self.JRFAB_same_scale = JRFAB_same_scale(nf)
 
         self.blk_x1 = make_layer(block, n_blks[3])
         self.blk_x2 = make_layer(block, n_blks[4])
         self.blk_x4 = make_layer(functools.partial(ResidualBlock, nf=nf), n_blks[5])
-        self.merge = nn.Conv2d(nf * 2, nf, 3, 1, 1, bias=True)
 
         self.conv_out = nn.Conv2d(nf, out_chl, 3, 1, 1, bias=True)
         self.act = nn.ReLU(inplace=True)
@@ -687,7 +708,7 @@ class MAB(nn.Module):
 
         if upscale == 2:
             warp_ref_x1 = self.SAB(tar_lr, F_M[1])
-            fea_x1 = self.act(self.merge(torch.cat([warp_ref_x1, tar_lr], dim=1)))
+            fea_x1 = self.JRFAB_same_scale(tar_lr, warp_ref_x1)
             fea_x1 = self.blk_x1(fea_x1)
             fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
@@ -699,7 +720,7 @@ class MAB(nn.Module):
 
         elif upscale == 4:
             warp_ref_x1 = self.SAB(tar_lr, F_M[2])
-            fea_x1 = self.act(self.merge(torch.cat([warp_ref_x1, tar_lr], dim=1)))
+            fea_x1 = self.JRFAB_same_scale(tar_lr, warp_ref_x1)
             fea_x1 = self.blk_x1(fea_x1)
             fea_x1_up = F.interpolate(fea_x1, scale_factor=2, mode='bilinear', align_corners=False)
 
