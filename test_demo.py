@@ -33,6 +33,11 @@ parser.add_argument('--net_G', type=str, default='McMRSR', help='generator netwo
 
 parser.add_argument('--n_recurrent', type=int, default=1, help='No modification required')
 parser.add_argument('--use_prior', default=False, action='store_true', help='No modification required')
+#Swin pama
+parser.add_argument('--upscale', type=int, default=4, help='upscale')
+parser.add_argument('--window_size', type=int, default=8, help='window_size')
+parser.add_argument('--height', type=int, default=64, help='lr_height')
+parser.add_argument('--width', type=int, default=64, help='lr_width')
 
 # loss options
 parser.add_argument('--wr_L1', type=float, default=1, help='weight for reconstruction L1 loss')
