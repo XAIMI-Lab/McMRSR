@@ -185,19 +185,38 @@ class RecurrentModel(nn.Module):
         for data in val_bar:
             self.set_input(data)
             self.forward()
+            
+            ############# back to [-1,1] #############
+            self.rec_real = (self.recon[:, 0, :, :] - 0.5) * 2
+            self.rec_imag = (self.recon[:, 1, :, :] - 0.5) * 2
+            self.rec_real = self.rec_real.unsqueeze(1)
+            self.rec_imag = self.rec_imag.unsqueeze(1)
+            self.rec = torch.cat([self.rec_real, self.rec_imag], dim=1)
+
+            self.gt_real = (self.tag_image_full[:, 0, :, :] - 0.5) * 2
+            self.gt_imag = (self.tag_image_full[:, 1, :, :] - 0.5) * 2
+            self.gt_real = self.gt_real.unsqueeze(1)
+            self.gt_imag = self.gt_imag.unsqueeze(1)
+            self.gt = torch.cat([self.gt_real, self.gt_imag], dim=1)
+
+            self.lr_real = (self.tag_image_sub[:, 0, :, :] - 0.5) * 2
+            self.lr_imag = (self.tag_image_sub[:, 1, :, :] - 0.5) * 2
+            self.lr_real = self.lr_real.unsqueeze(1)
+            self.lr_imag = self.lr_imag.unsqueeze(1)
+            self.lr = torch.cat([self.lr_real, self.lr_imag], dim=1)
 
             if self.opts.wr_L1 > 0:
-                psnr_recon = psnr(complex_abs_eval(self.recon),
-                                  complex_abs_eval(self.tag_image_full))
+                psnr_recon = psnr(complex_abs_eval(self.rec),
+                                  complex_abs_eval(self.gt))
                 avg_psnr.update(psnr_recon)
 
-                ssim_recon = ssim(complex_abs_eval(self.recon)[0,0,:,:].cpu().numpy(),
-                                  complex_abs_eval(self.tag_image_full)[0,0,:,:].cpu().numpy())
+                ssim_recon = ssim(complex_abs_eval(self.rec)[0, 0, :, :].cpu().numpy(),
+                                  complex_abs_eval(self.gt)[0, 0, :, :].cpu().numpy())
                 avg_ssim.update(ssim_recon)
 
-                recon_images.append(self.recon[0].cpu())
-                gt_images.append(self.tag_image_full[0].cpu())
-                input_images.append(self.tag_image_sub[0].cpu())
+                recon_images.append(self.rec[0].cpu())
+                gt_images.append(self.gt[0].cpu())
+                input_images.append(self.lr[0].cpu())
 
             message = 'PSNR: {:4f} '.format(avg_psnr.avg)
             message += 'SSIM: {:4f} '.format(avg_ssim.avg)
